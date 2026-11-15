@@ -81,63 +81,6 @@ Category:`;
 }
 
 /**
- * Node 2: Document Knowledge Retrieval
- * Semantic retrieval tool invoking Supabase match_document_chunks RPC.
- * Explicitly traced in LangSmith as a retrieval tool run.
- */
-const retrieveKnowledgeTool = traceable(
-  async function retrieveCompanyKnowledge(companyId, query, supabaseClient) {
-    if (!companyId || !query || !supabaseClient) {
-      return [];
-    }
-
-    // Step A: Generate 768-dim query embedding using Gemini
-    const embedding = await getGeminiEmbedding(query);
-
-    // Step B: Query Supabase multi-tenant vector RPC
-    const { data: chunks, error } = await supabaseClient.rpc(
-      'match_document_chunks',
-      {
-        query_embedding: embedding,
-        filter_company_id: companyId,
-        match_threshold: 0.5,
-        match_count: 3,
-      }
-    );
-
-    if (error) {
-      throw new Error(`Vector retrieval RPC error: ${error.message}`);
-    }
-
-    return chunks || [];
-  },
-  {
-    name: 'retrieve_company_knowledge',
-    run_type: 'retriever',
-    metadata: {
-      vector_dim: 768,
-      embedding_provider: 'gemini-text-embedding-004',
-      storage_type: 'pgvector_supabase',
-    },
-  }
-);
-
-async function retrieveKnowledgeNode(state, config) {
-  const query = state.customerQuery || state.messages[state.messages.length - 1]?.content || '';
-  const supabase = config?.configurable?.supabaseClient;
-
-  try {
-    const chunks = await retrieveKnowledgeTool(state.companyId, query, supabase);
-    return { retrievedChunks: chunks };
-  } catch (err) {
-    return {
-      retrievedChunks: [],
-      executionErrors: [`Retrieval error: ${err.message}`],
-    };
-  }
-}
-
-/**
  * Node 3: Grounded Response Generation
  * Invokes Groq LLM with retrieved context. Traced by LangSmith.
  */
@@ -174,82 +117,122 @@ Support Response:`;
 }
 
 /**
- * Node 4: Ticket Escalation Tool
- * Creates support ticket in Supabase when issue requires human takeover.
- * Traced in LangSmith as a tool execution run.
+ * Build and compile the LangGraph workflow with scoped Supabase client.
+ * Closure ensures Supabase client is never passed into traceable inputs,
+ * completely preventing circular JSON warnings in LangSmith.
  */
-const createTicketTool = traceable(
-  async function createSupportTicket(companyId, conversationId, query, response, supabaseClient) {
-    if (!supabaseClient || !companyId) return null;
+export function buildSupportGraph(supabaseClient) {
+  // Scoped traceable retrieval tool
+  const retrieveKnowledgeTool = traceable(
+    async function retrieve_company_knowledge(companyId, query) {
+      if (!companyId || !query || !supabaseClient) return [];
 
-    const { data: ticket, error } = await supabaseClient
-      .from('tickets')
-      .insert({
-        company_id: companyId,
-        conversation_id: conversationId || null,
-        title: `Support Escalation: ${query.substring(0, 50)}...`,
-        description: `Customer Query:\n${query}\n\nAI Response Draft:\n${response}`,
-        priority: 'high',
-        status: 'open',
-      })
-      .select()
-      .maybeSingle();
+      const embedding = await getGeminiEmbedding(query);
+      const { data: chunks, error } = await supabaseClient.rpc(
+        'match_document_chunks',
+        {
+          query_embedding: embedding,
+          filter_company_id: companyId,
+          match_threshold: 0.5,
+          match_count: 3,
+        }
+      );
 
-    if (error) {
-      throw new Error(`Ticket creation error: ${error.message}`);
+      if (error) {
+        throw new Error(`Vector retrieval RPC error: ${error.message}`);
+      }
+
+      return chunks || [];
+    },
+    {
+      name: 'retrieve_company_knowledge',
+      run_type: 'retriever',
+      metadata: {
+        vector_dim: 768,
+        embedding_provider: 'gemini-text-embedding-004',
+        storage_type: 'pgvector_supabase',
+      },
+    }
+  );
+
+  // Scoped traceable ticket creation tool
+  const createTicketTool = traceable(
+    async function create_support_ticket(companyId, conversationId, query, response) {
+      if (!supabaseClient || !companyId) return null;
+
+      const { data: ticket, error } = await supabaseClient
+        .from('tickets')
+        .insert({
+          company_id: companyId,
+          conversation_id: conversationId || null,
+          title: `Support Escalation: ${query.substring(0, 50)}...`,
+          description: `Customer Query:\n${query}\n\nAI Response Draft:\n${response}`,
+          priority: 'high',
+          status: 'open',
+        })
+        .select()
+        .maybeSingle();
+
+      if (error) {
+        throw new Error(`Ticket creation error: ${error.message}`);
+      }
+
+      return ticket;
+    },
+    {
+      name: 'create_support_ticket',
+      run_type: 'tool',
+      metadata: {
+        action: 'ticket_escalation',
+      },
+    }
+  );
+
+  const retrieveNode = async (state) => {
+    const query = state.customerQuery || state.messages[state.messages.length - 1]?.content || '';
+    try {
+      const chunks = await retrieveKnowledgeTool(state.companyId, query);
+      return { retrievedChunks: chunks };
+    } catch (err) {
+      return {
+        retrievedChunks: [],
+        executionErrors: [`Retrieval error: ${err.message}`],
+      };
+    }
+  };
+
+  const escalateNode = async (state) => {
+    const query = state.customerQuery || state.messages[state.messages.length - 1]?.content || '';
+    const requiresEscalation =
+      state.retrievedChunks.length === 0 ||
+      /refund|cancel|human|agent|urgent|speak with someone|complaint/i.test(query);
+
+    if (!requiresEscalation) {
+      return { needsEscalation: false, ticket: null };
     }
 
-    return ticket;
-  },
-  {
-    name: 'create_support_ticket',
-    run_type: 'tool',
-    metadata: {
-      action: 'ticket_escalation',
-    },
-  }
-);
+    try {
+      const ticket = await createTicketTool(
+        state.companyId,
+        state.conversationId,
+        query,
+        state.response
+      );
+      return { needsEscalation: true, ticket };
+    } catch (err) {
+      return {
+        needsEscalation: true,
+        ticket: null,
+        executionErrors: [`Ticket creation error: ${err.message}`],
+      };
+    }
+  };
 
-async function escalateIfNeededNode(state, config) {
-  const query = state.customerQuery || state.messages[state.messages.length - 1]?.content || '';
-  const supabase = config?.configurable?.supabaseClient;
-
-  // Determine escalation criteria: lack of retrieved context or urgent intent keywords
-  const requiresEscalation =
-    state.retrievedChunks.length === 0 ||
-    /refund|cancel|human|agent|urgent|speak with someone|complaint/i.test(query);
-
-  if (!requiresEscalation) {
-    return { needsEscalation: false, ticket: null };
-  }
-
-  try {
-    const ticket = await createTicketTool(
-      state.companyId,
-      state.conversationId,
-      query,
-      state.response,
-      supabase
-    );
-    return { needsEscalation: true, ticket };
-  } catch (err) {
-    return {
-      needsEscalation: true,
-      ticket: null,
-      executionErrors: [`Ticket creation error: ${err.message}`],
-    };
-  }
-}
-
-/**
- * Build and compile the LangGraph workflow
- */
-export function createSupportAgentGraph() {
   const workflow = new StateGraph(SupportAgentAnnotation)
     .addNode('classify_intent', classifyIntentNode)
-    .addNode('retrieve_knowledge', retrieveKnowledgeNode)
+    .addNode('retrieve_knowledge', retrieveNode)
     .addNode('generate_response', generateResponseNode)
-    .addNode('escalate_if_needed', escalateIfNeededNode)
+    .addNode('escalate_if_needed', escalateNode)
     .addEdge(START, 'classify_intent')
     .addEdge('classify_intent', 'retrieve_knowledge')
     .addEdge('retrieve_knowledge', 'generate_response')
@@ -258,6 +241,3 @@ export function createSupportAgentGraph() {
 
   return workflow.compile();
 }
-
-// Singleton compiled agent graph
-export const compiledSupportGraph = createSupportAgentGraph();

@@ -1,4 +1,4 @@
-import { compiledSupportGraph } from './graph.js';
+import { buildSupportGraph } from './graph.js';
 import { isTracingEnabled, project } from '../config/langsmith.js';
 
 /**
@@ -33,10 +33,7 @@ export async function runSupportAgent({
   // LangSmith Run Configuration:
   // Injects tags, tenant metadata, and execution run name for comprehensive observability
   const runConfig = {
-    configurable: {
-      supabaseClient,
-    },
-    runName: `SERVIQ-X Agent - ${conversationId || 'session'}`,
+    runName: `Customer Support Agent [${conversationId ? conversationId.substring(0, 8) : 'session'}]`,
     tags: [
       'serviq-x',
       'customer-support',
@@ -56,8 +53,11 @@ export async function runSupportAgent({
 
   console.log(`[SERVIQ-X Agent] Running LangGraph agent for company: ${companyId || 'N/A'}`);
 
-  // Execute the compiled LangGraph workflow (automatically creates root run in LangSmith)
-  const finalState = await compiledSupportGraph.invoke(initialState, runConfig);
+  // Compile graph with scoped client (eliminates circular JSON warnings)
+  const graph = buildSupportGraph(supabaseClient);
+
+  // Execute the LangGraph workflow (automatically creates root run in LangSmith)
+  const finalState = await graph.invoke(initialState, runConfig);
 
   // If conversationId is provided, record the message in Supabase
   if (conversationId && supabaseClient) {
