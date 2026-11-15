@@ -16,6 +16,7 @@ export async function runSupportAgent({
   customerMessage,
   conversationHistory = [],
   supabaseClient,
+  options = {},
 }) {
   if (!customerMessage) {
     throw new Error('customerMessage is required');
@@ -54,8 +55,8 @@ export async function runSupportAgent({
 
   console.log(`[SERVIQ-X Engine] Executing AI Agent for company ${companyId || 'N/A'}`);
 
-  // 3. Compile Graph with Scoped Supabase Context
-  const graph = buildSupportGraph(supabaseClient);
+  // 3. Compile Graph with Scoped Supabase & Options Context
+  const graph = buildSupportGraph(supabaseClient, options);
 
   // 4. Execute Workflow
   const finalState = await graph.invoke(initialState, runConfig);

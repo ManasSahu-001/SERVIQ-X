@@ -2,62 +2,89 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
-const GEMINI_EMBEDDING_MODEL = process.env.GEMINI_EMBEDDING_MODEL || process.env.EMBEDDING_MODEL || 'text-embedding-004';
+// If GEMINI_EMBEDDING_MODEL is text-embedding-004 (which returns 404 on v1beta for this key), use gemini-embedding-001
+const RAW_MODEL = process.env.GEMINI_EMBEDDING_MODEL || process.env.EMBEDDING_MODEL || 'gemini-embedding-001';
+export const GEMINI_EMBEDDING_MODEL = RAW_MODEL === 'text-embedding-004' ? 'gemini-embedding-001' : RAW_MODEL;
 export const EXPECTED_VECTOR_DIMENSION = 768;
 export const EMBEDDING_DIMENSION = EXPECTED_VECTOR_DIMENSION;
 
 /**
- * Generates a 768-dimensional embedding matching Supabase schema vector(768).
- * Uses Google Gemini text-embedding-004 with deterministic fallback for local testing.
+ * Generates a genuine 768-dimensional embedding from Google Gemini API.
+ * Uses gemini-embedding-001 with outputDimensionality: 768 to strictly match pgvector(768).
+ *
+ * In production mode, failures throw genuine errors. Silent fake vector substitution is removed.
  *
  * @param {string} text - Content to embed
+ * @param {object} options - Optional configuration (e.g. { allowMock: false })
  * @returns {Promise<number[]>} - 768-dimensional vector
  */
-export async function getGeminiEmbedding(text) {
+export async function getGeminiEmbedding(text, options = {}) {
   if (!text || typeof text !== 'string') {
     throw new Error('Input text must be a non-empty string');
   }
 
-  // If key is missing or dummy
-  if (!GEMINI_API_KEY || GEMINI_API_KEY.includes('your_') || GEMINI_API_KEY.length < 15) {
+  // Explicit unit test mock bypass if requested
+  if (options.mock === true) {
     return generateDeterministic768Vector(text);
   }
 
-  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_EMBEDDING_MODEL}:embedContent?key=${GEMINI_API_KEY}`;
+  if (!GEMINI_API_KEY || GEMINI_API_KEY.includes('your_') || GEMINI_API_KEY.length < 15) {
+    throw new Error('GEMINI_API_KEY is not configured with a valid key. Production execution halted.');
+  }
+
+  const modelName = options.model || GEMINI_EMBEDDING_MODEL;
+  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:embedContent?key=${GEMINI_API_KEY}`;
   
+  const startTime = Date.now();
+  console.log(`[Gemini Embedding] Request started | Model: ${modelName} | Target Dim: ${EXPECTED_VECTOR_DIMENSION}`);
+
+  let response;
   try {
-    const response = await fetch(endpoint, {
+    response = await fetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        model: `models/${GEMINI_EMBEDDING_MODEL}`,
+        model: `models/${modelName}`,
         content: { parts: [{ text }] },
+        outputDimensionality: EXPECTED_VECTOR_DIMENSION,
       }),
     });
-
-    if (response.ok) {
-      const data = await response.json();
-      const values = data.embedding?.values;
-      if (values && values.length === EXPECTED_VECTOR_DIMENSION) {
-        return values;
-      }
-      console.warn(`[Gemini Embedding] Dimension mismatch: expected ${EXPECTED_VECTOR_DIMENSION}, got ${values?.length}. Truncating/padding.`);
-      return normalizeTo768(values);
-    }
-
-    const errorText = await response.text();
-    const sanitizedError = errorText.replace(/key=[a-zA-Z0-9_\-\.]+/g, 'key=[REDACTED]');
-    console.warn(`[Gemini API Notice] Embed API returned status ${response.status}: ${sanitizedError}. Using deterministic 768-dim vector.`);
-    return generateDeterministic768Vector(text);
   } catch (netErr) {
-    console.warn(`[Gemini Network Notice] ${netErr.message}. Using deterministic 768-dim vector.`);
-    return generateDeterministic768Vector(text);
+    const latency = Date.now() - startTime;
+    console.error(`[Gemini Embedding] Network Error after ${latency}ms: ${netErr.message}`);
+    throw new Error(`Gemini Embedding network connection failed: ${netErr.message}`);
   }
+
+  const latency = Date.now() - startTime;
+
+  if (response.ok) {
+    const data = await response.json();
+    const values = data.embedding?.values;
+    if (values && values.length === EXPECTED_VECTOR_DIMENSION) {
+      console.log(`[Gemini Embedding] Success in ${latency}ms | Status: 200 OK | Dimensions: ${values.length}`);
+      return values;
+    }
+    throw new Error(`Gemini API returned unexpected embedding dimension: ${values?.length} (expected ${EXPECTED_VECTOR_DIMENSION})`);
+  }
+
+  const errorText = await response.text();
+  const sanitizedError = errorText.replace(/key=[a-zA-Z0-9_\-\.]+/g, 'key=[REDACTED]');
+  console.error(`[Gemini Embedding] HTTP ${response.status} Error after ${latency}ms: ${sanitizedError}`);
+
+  // If text-embedding-004 was requested and failed, attempt immediate auto-fallback to gemini-embedding-001
+  if (modelName !== 'gemini-embedding-001') {
+    console.log(`[Gemini Embedding] Retrying with compatible model 'gemini-embedding-001'...`);
+    return getGeminiEmbedding(text, { ...options, model: 'gemini-embedding-001' });
+  }
+
+  throw new Error(`Gemini Embedding API failed with HTTP ${response.status}: ${sanitizedError}`);
 }
 
+export const generateEmbedding = getGeminiEmbedding;
+
 /**
- * Produces a normalized, semantically consistent 768-dimensional vector
- * from text for offline development, deterministic RAG evaluations, and testing.
+ * Deterministic unit vector generator strictly reserved for isolated unit tests.
+ * NEVER used as silent production fallback.
  */
 export function generateDeterministic768Vector(text) {
   const vector = new Array(EXPECTED_VECTOR_DIMENSION).fill(0);
@@ -88,7 +115,7 @@ export function generateDeterministic768Vector(text) {
     vector[7] += 0.40;
   }
 
-  // L2 Normalize the vector so cosine similarity is standard and accurate
+  // L2 Normalize
   let norm = 0;
   for (let i = 0; i < EXPECTED_VECTOR_DIMENSION; i++) {
     norm += vector[i] * vector[i];
@@ -101,13 +128,3 @@ export function generateDeterministic768Vector(text) {
 
   return vector;
 }
-
-function normalizeTo768(rawValues) {
-  const res = new Array(EXPECTED_VECTOR_DIMENSION).fill(0);
-  for (let i = 0; i < EXPECTED_VECTOR_DIMENSION; i++) {
-    res[i] = rawValues && rawValues[i] !== undefined ? rawValues[i] : 0;
-  }
-  return res;
-}
-
-export const generateEmbedding = getGeminiEmbedding;

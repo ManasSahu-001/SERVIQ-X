@@ -4,8 +4,8 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
-export const PRIMARY_GROQ_MODEL = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
-export const FAST_GROQ_MODEL = process.env.GROQ_FAST_MODEL || 'llama-3.1-8b-instant';
+export const PRIMARY_GROQ_MODEL = process.env.GROQ_MODEL || 'openai/gpt-oss-120b';
+export const FAST_GROQ_MODEL = process.env.GROQ_FAST_MODEL || 'openai/gpt-oss-20b';
 
 /**
  * Creates an instance of ChatGroq configured with specified model and options.
@@ -28,7 +28,7 @@ export function getGroqChatModel(options = {}) {
 
 /**
  * Robustly parses and extracts JSON from LLM output.
- * Handles markdown code blocks, escaped characters, and leading/trailing noise.
+ * Handles markdown code blocks, escaped characters, and leading/trailing reasoning text.
  */
 export function extractAndParseJSON(text) {
   if (typeof text !== 'string') {
@@ -68,19 +68,50 @@ export function extractAndParseJSON(text) {
 }
 
 /**
+ * Categorizes an error for safe observability without exposing headers or secrets.
+ */
+function categorizeError(err) {
+  const msg = (err?.message || '').toLowerCase();
+  const status = err?.status || err?.statusCode || null;
+
+  if (msg.includes('timed out') || msg.includes('timeout') || err?.name === 'AbortError') {
+    return { category: 'TIMEOUT_ERROR', status: status || 408 };
+  }
+  if (status === 401 || msg.includes('invalid_api_key') || msg.includes('unauthorized')) {
+    return { category: 'AUTHENTICATION_ERROR', status: status || 401 };
+  }
+  if (status === 429 || msg.includes('rate_limit') || msg.includes('too many requests')) {
+    return { category: 'RATE_LIMIT_ERROR', status: status || 429 };
+  }
+  if (msg.includes('enotfound') || msg.includes('econnrefused') || msg.includes('connection error') || msg.includes('fetch failed')) {
+    return { category: 'NETWORK_CONNECTION_ERROR', status: status || 503 };
+  }
+  if (msg.includes('json') || msg.includes('schema') || msg.includes('zod')) {
+    return { category: 'OUTPUT_VALIDATION_ERROR', status: 422 };
+  }
+  return { category: 'INTERNAL_MODEL_ERROR', status: status || 500 };
+}
+
+/**
  * Executes a Groq model call with LangSmith tracing, structured output validation,
- * retries with exponential backoff, and timeout enforcement.
+ * retries with exponential backoff, and 60-second timeout enforcement.
+ *
+ * Silent mock fallback is removed in production. Live failures report exact diagnostic details.
  */
 export const invokeGroqWithTracing = traceable(
   async function groqChatCompletion(prompt, options = {}) {
     const modelType = options.modelType || 'primary';
     const targetModel = options.model || (modelType === 'fast' ? FAST_GROQ_MODEL : PRIMARY_GROQ_MODEL);
-    const timeoutMs = options.timeoutMs || 25000;
+    const timeoutMs = options.timeoutMs || 60000; // 60-second timeout per specification
     const schema = options.schema || null;
 
-    if (!GROQ_API_KEY || GROQ_API_KEY.includes('your_groq_api_key')) {
-      console.warn('[Groq] GROQ_API_KEY is not configured. Using deterministic fallback.');
+    // Explicit unit test mock mode only
+    if (options.mock === true) {
       return simulateGroqResponse(prompt, null, schema, modelType);
+    }
+
+    if (!GROQ_API_KEY || GROQ_API_KEY.includes('your_groq_api_key')) {
+      throw new Error('GROQ_API_KEY is not configured with a valid key. Production execution halted.');
     }
 
     const model = getGroqChatModel({
@@ -89,11 +120,13 @@ export const invokeGroqWithTracing = traceable(
       temperature: options.temperature,
     });
 
-    // Execute with timeout and retry handling
+    const maxAttempts = options.maxAttempts || 2;
     let lastError = null;
-    const maxAttempts = 2;
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      const callStart = Date.now();
+      console.log(`[Groq Live Call] Attempt ${attempt}/${maxAttempts} Started | Model: ${targetModel} | Timeout: ${timeoutMs}ms`);
+
       try {
         const timeoutPromise = new Promise((_, reject) =>
           setTimeout(() => reject(new Error(`Groq request timed out after ${timeoutMs}ms`)), timeoutMs)
@@ -101,6 +134,9 @@ export const invokeGroqWithTracing = traceable(
 
         const invokePromise = model.invoke(prompt);
         const response = await Promise.race([invokePromise, timeoutPromise]);
+
+        const latency = Date.now() - callStart;
+        console.log(`[Groq Live Call] Attempt ${attempt} Succeeded in ${latency}ms | Model: ${targetModel} | Status: 200 OK`);
 
         const rawContent = typeof response.content === 'string'
           ? response.content
@@ -121,19 +157,25 @@ export const invokeGroqWithTracing = traceable(
 
         return rawContent;
       } catch (err) {
+        const latency = Date.now() - callStart;
         lastError = err;
+        const errInfo = categorizeError(err);
         const sanitizedErr = err.message.replace(/gsk_[a-zA-Z0-9_-]+/g, '[REDACTED_KEY]');
-        console.warn(`[Groq Attempt ${attempt}/${maxAttempts} Failed]: ${sanitizedErr}`);
+
+        console.error(`[Groq Live Call] Attempt ${attempt}/${maxAttempts} Failed after ${latency}ms | Category: ${errInfo.category} | HTTP: ${errInfo.status} | Notice: ${sanitizedErr}`);
 
         if (attempt < maxAttempts) {
-          await new Promise((res) => setTimeout(res, 1000 * attempt)); // Exponential backoff
+          const backoffMs = 1500 * attempt;
+          console.log(`[Groq Live Call] Retrying in ${backoffMs}ms...`);
+          await new Promise((res) => setTimeout(res, backoffMs));
         }
       }
     }
 
-    // Graceful fallback when remote Groq API fails or credentials are placeholder/invalid
-    console.warn(`[Groq Fallback] Remote API unavailable. Generating safe response.`);
-    return simulateGroqResponse(prompt, lastError?.message, schema, modelType);
+    // Fail honestly in production: Never silently mask with simulated success
+    const errInfo = categorizeError(lastError);
+    const sanitizedFinalErr = lastError.message.replace(/gsk_[a-zA-Z0-9_-]+/g, '[REDACTED_KEY]');
+    throw new Error(`Groq API invocation failed permanently after ${maxAttempts} attempts [${errInfo.category}]: ${sanitizedFinalErr}`);
   },
   {
     name: 'Groq Chat Completion',
@@ -150,19 +192,19 @@ export const invokeGroqFastWithTracing = (prompt, options = {}) =>
   invokeGroqWithTracing(prompt, { ...options, modelType: 'fast' });
 
 /**
- * Deterministic fallback for testing/offline scenarios.
- * Produces structured JSON matching Zod schemas when required.
+ * Deterministic fallback generator strictly reserved for isolated unit tests.
+ * Only invoked when options.mock === true is explicitly requested.
  */
-function simulateGroqResponse(prompt, errorNotice = null, schema = null, modelType = 'primary') {
+export function simulateGroqResponse(prompt, errorNotice = null, schema = null, modelType = 'primary') {
   const promptText = typeof prompt === 'string' ? prompt : JSON.stringify(prompt);
 
   // If Judge evaluation requested
   if (schema && /LLM-as-a-Judge|judge|evaluate/i.test(promptText)) {
-    const isRefund = /refund|cancel|billing|dispute/i.test(promptText);
-    const hasContext = !/No specific company documentation found|No relevant/i.test(promptText);
-    const isGreeting = /hello|hi|hey/i.test(promptText);
+    // Only actual financial demands trigger human review in unit test mock
+    const isActualRefundDemand = /(process|issue|send|give)\s+(a\s+)?refund|cancel\s+(my\s+)?order/i.test(promptText);
+    const hasContext = !/No specific company documentation found|No relevant|NONE \(No company documentation/i.test(promptText);
 
-    if (isRefund) {
+    if (isActualRefundDemand) {
       return {
         decision: 'REQUEST_HUMAN_REVIEW',
         faithfulness_score: 0.95,
@@ -177,7 +219,7 @@ function simulateGroqResponse(prompt, errorNotice = null, schema = null, modelTy
       };
     }
 
-    if (!hasContext && !isGreeting) {
+    if (!hasContext) {
       return {
         decision: 'REQUEST_HUMAN_REVIEW',
         faithfulness_score: 0.3,
@@ -216,14 +258,13 @@ function simulateGroqResponse(prompt, errorNotice = null, schema = null, modelTy
 
   // If Query rewriting
   if (/rewrite/i.test(promptText)) {
-    return promptText.replace(/.*customer query:\s*"?/i, '').replace(/"?\s*standalone search query:?.*/i, '').trim() || 'company policy';
+    return 'customer inquiry policy details';
   }
 
   // If Summary generation
   if (/summary/i.test(promptText)) {
-    return `Customer inquired about support. AI evaluated issue against knowledge base. Status updated.`;
+    return 'Customer requested support assistance. Knowledge retrieved and analyzed.';
   }
 
-  // Standard response generation
-  return `Thank you for contacting customer support. Based on our company documentation, we are ready to assist you. Please let us know if you need further details.`;
+  return 'Thank you for reaching out. Based on our policy, items can be returned within 30 days for a full refund.';
 }

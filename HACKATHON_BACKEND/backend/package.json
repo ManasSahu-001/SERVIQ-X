@@ -1,0 +1,49 @@
+{
+  "name": "serviq-x-backend",
+  "version": "1.0.0",
+  "description": "SERVIQ-X — Autonomous AI Customer Support Backend & AI Infrastructure",
+  "main": "dist/server.js",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc",
+    "start": "node dist/server.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "evaluate": "tsx src/evaluations/runEvaluations.ts"
+  },
+  "dependencies": {
+    "@langchain/core": "^0.3.37",
+    "@langchain/groq": "^0.1.3",
+    "@langchain/langgraph": "^0.2.45",
+    "@supabase/supabase-js": "^2.48.1",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "express-rate-limit": "^7.5.0",
+    "groq-sdk": "^0.15.0",
+    "helmet": "^8.0.0",
+    "langsmith": "^0.3.8",
+    "multer": "^1.4.5-lts.1",
+    "pdf-parse": "^1.1.1",
+    "pino": "^9.6.0",
+    "pino-http": "^10.4.0",
+    "socket.io": "^4.8.1",
+    "uuid": "^11.0.5",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^5.0.0",
+    "@types/multer": "^1.4.12",
+    "@types/node": "^22.13.1",
+    "@types/pdf-parse": "^1.1.4",
+    "@types/supertest": "^6.0.2",
+    "@types/uuid": "^10.0.0",
+    "pino-pretty": "^13.0.0",
+    "supertest": "^7.0.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3",
+    "vitest": "^3.0.5"
+  }
+}

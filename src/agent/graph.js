@@ -38,7 +38,7 @@ function routeAfterJudge(state) {
   const decision = state.judgeResult?.decision;
   const count = state.regenerationCount || 0;
 
-  if (decision === 'APPROVE_AI_RESPONSE') {
+  if (decision === 'APPROVE_AI_RESPONSE' || decision === 'REFUSE_RESPONSE') {
     return 'send_response';
   }
 
@@ -57,33 +57,33 @@ function routeAfterJudge(state) {
  * Scopes the Supabase client inside the workflow execution context,
  * ensuring no circular references or credential leaks into LangSmith.
  */
-export function buildSupportGraph(supabaseClient) {
+export function buildSupportGraph(supabaseClient, options = {}) {
   const workflow = new StateGraph(SupportAgentState)
     // 1. Session initialization
-    .addNode('load_conversation', (state) => loadConversationNode(state, { configurable: { supabaseClient } }))
+    .addNode('load_conversation', (state) => loadConversationNode(state, { configurable: { supabaseClient, options } }))
     
     // 2. Query understanding
-    .addNode('classify_intent', classifyIntentNode)
-    .addNode('rewrite_query', rewriteQueryNode)
+    .addNode('classify_intent', (state) => classifyIntentNode(state, { configurable: { options } }))
+    .addNode('rewrite_query', (state) => rewriteQueryNode(state, { configurable: { options } }))
 
     // 3. Knowledge retrieval & generation
-    .addNode('retrieve_knowledge', (state) => retrieveKnowledgeNode(state, { configurable: { supabaseClient } }))
-    .addNode('generate_response', generateResponseNode)
+    .addNode('retrieve_knowledge', (state) => retrieveKnowledgeNode(state, { configurable: { supabaseClient, options } }))
+    .addNode('generate_response', (state) => generateResponseNode(state, { configurable: { options } }))
 
     // 4. LLM-as-a-Judge evaluation
-    .addNode('evaluate_response', evaluateResponseNode)
+    .addNode('evaluate_response', (state) => evaluateResponseNode(state, { configurable: { options } }))
 
     // 5. Approved pathway
     .addNode('send_response', sendResponseNode)
 
     // 6. Escalation & human review pathway
     .addNode('generate_suggested_reply', generateSuggestedReplyNode)
-    .addNode('create_support_ticket', (state) => createSupportTicketNode(state, { configurable: { supabaseClient } }))
-    .addNode('generate_summary', generateSummaryNode)
+    .addNode('create_support_ticket', (state) => createSupportTicketNode(state, { configurable: { supabaseClient, options } }))
+    .addNode('generate_summary', (state) => generateSummaryNode(state, { configurable: { options } }))
     .addNode('human_review', humanReviewNode)
 
     // 7. Persistence & completion
-    .addNode('update_conversation', (state) => updateConversationNode(state, { configurable: { supabaseClient } }))
+    .addNode('update_conversation', (state) => updateConversationNode(state, { configurable: { supabaseClient, options } }))
 
     // Edge definitions
     .addEdge(START, 'load_conversation')

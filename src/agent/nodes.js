@@ -45,8 +45,9 @@ export async function loadConversationNode(state, config) {
  * Node 2: classify_intent
  * Uses fast Groq model to identify user intent.
  */
-export async function classifyIntentNode(state) {
+export async function classifyIntentNode(state, config) {
   const query = state.customerMessage || '';
+  const isMock = config?.configurable?.options?.mock === true;
   const prompt = `Classify this customer support query into exactly ONE category:
 - returns_and_refunds
 - billing
@@ -60,6 +61,7 @@ Category:`;
     const rawCategory = await invokeGroqWithTracing(prompt, {
       modelType: 'fast',
       temperature: 0.1,
+      mock: isMock,
     });
     const category = rawCategory.trim().toLowerCase().replace(/[^a-z_]/g, '');
     const validCategories = ['returns_and_refunds', 'billing', 'technical_issue', 'general_inquiry'];
@@ -78,9 +80,10 @@ Category:`;
  * Node 3: rewrite_query
  * Resolves context references into a standalone search query.
  */
-export async function rewriteQueryNode(state) {
+export async function rewriteQueryNode(state, config) {
   const query = state.customerMessage || '';
   const history = state.conversationHistory || [];
+  const isMock = config?.configurable?.options?.mock === true;
 
   if (history.length === 0) {
     return { rewrittenQuery: query };
@@ -106,6 +109,7 @@ Standalone Search Query:`;
     const rewritten = await invokeGroqWithTracing(prompt, {
       modelType: 'fast',
       temperature: 0.1,
+      mock: isMock,
     });
     return {
       rewrittenQuery: rewritten.replace(/^["']|["']$/g, '').trim() || query,
@@ -125,6 +129,7 @@ export async function retrieveKnowledgeNode(state, config) {
   const supabase = config?.configurable?.supabaseClient;
   const companyId = state.companyId;
   const query = state.rewrittenQuery || state.customerMessage || '';
+  const isMock = config?.configurable?.options?.mock === true;
 
   if (!supabase || !companyId || !query) {
     return { retrievedChunks: [], retrievedSources: [] };
@@ -134,6 +139,7 @@ export async function retrieveKnowledgeNode(state, config) {
     const chunks = await retrieveKnowledge(companyId, query, supabase, {
       matchThreshold: 0.5,
       matchCount: 4,
+      mock: isMock,
     });
 
     const sources = chunks.map((c) => ({
@@ -160,10 +166,11 @@ export async function retrieveKnowledgeNode(state, config) {
  * Node 5: generate_response
  * Synthesizes grounded support response using primary Groq model.
  */
-export async function generateResponseNode(state) {
+export async function generateResponseNode(state, config) {
   const query = state.customerMessage || '';
   const chunks = state.retrievedChunks || [];
   const intent = state.intent;
+  const isMock = config?.configurable?.options?.mock === true;
 
   const contextText = chunks.length > 0
     ? chunks.map((c, i) => `[Source ${i + 1} - Page ${c.page_number || 1}]:\n${c.content}`).join('\n\n')
@@ -190,6 +197,7 @@ Response:`;
     const reply = await invokeGroqWithTracing(prompt, {
       modelType: 'primary',
       temperature: 0.2,
+      mock: isMock,
     });
     return {
       generatedResponse: reply.trim(),
@@ -208,13 +216,15 @@ Response:`;
  * Node 6: evaluate_response
  * Evaluates response using LLM-as-a-Judge with primary Groq model.
  */
-export async function evaluateResponseNode(state) {
+export async function evaluateResponseNode(state, config) {
+  const isMock = config?.configurable?.options?.mock === true;
   const evaluation = await runJudgeEvaluation({
     customerQuery: state.customerMessage,
     generatedResponse: state.generatedResponse,
     retrievedChunks: state.retrievedChunks,
     intent: state.intent,
     regenerationCount: state.regenerationCount,
+    options: { mock: isMock },
   });
 
   return {
@@ -315,11 +325,12 @@ export async function createSupportTicketNode(state, config) {
  * Node 9: generate_summary
  * Generates structured conversation summary for human agent takeover.
  */
-export async function generateSummaryNode(state) {
+export async function generateSummaryNode(state, config) {
   const query = state.customerMessage || '';
   const intent = state.intent || 'general_inquiry';
   const reason = state.escalationReason || 'None';
   const chunksCount = state.retrievedChunks?.length || 0;
+  const isMock = config?.configurable?.options?.mock === true;
 
   const prompt = `Summarize the customer support interaction:
 Customer query: "${query}"
@@ -333,6 +344,7 @@ Produce a concise 2-sentence summary and recommended next action for the human a
     const summaryText = await invokeGroqWithTracing(prompt, {
       modelType: 'fast',
       temperature: 0.1,
+      mock: isMock,
     });
 
     const summaryObj = {
@@ -374,8 +386,16 @@ export async function humanReviewNode(state) {
  * Prepares approved AI answer for immediate delivery to customer.
  */
 export async function sendResponseNode(state) {
+  let finalResponse = state.generatedResponse;
+
+  // Explicit handling for REFUSE_RESPONSE
+  if (state.judgeResult?.decision === 'REFUSE_RESPONSE') {
+    finalResponse = state.judgeResult.refusal_message ||
+      "I cannot provide personal contact details or private employee information. For official corporate communications, please reach out through our public support channels.";
+  }
+
   return {
-    finalResponse: state.generatedResponse,
+    finalResponse,
     requiresHumanApproval: false,
   };
 }

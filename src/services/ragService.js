@@ -200,8 +200,8 @@ export const retrieveKnowledge = traceable(
     const matchThreshold = options.matchThreshold ?? 0.5;
     const matchCount = options.matchCount ?? 4;
 
-    // 1. Embed query with Gemini
-    const queryEmbedding = await getGeminiEmbedding(query);
+    // 1. Embed query with Gemini (genuine 768-dim vector)
+    const queryEmbedding = await getGeminiEmbedding(query, options);
 
     // 2. Invoke Supabase RPC
     const { data: chunks, error } = await supabaseClient.rpc(
