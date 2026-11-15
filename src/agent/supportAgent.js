@@ -2,43 +2,44 @@ import { buildSupportGraph } from './graph.js';
 import { isTracingEnabled, project } from '../config/langsmith.js';
 
 /**
- * Entry point to execute the SERVIQ-X LangGraph Support Agent.
- * Configured with LangSmith tracing, tagging, and multi-tenant metadata.
+ * Executes the complete SERVIQ-X LangGraph AI Customer Support Engine.
+ *
+ * Full pipeline:
+ * Customer Message -> Load Conversation -> Intent Classification -> Query Understanding ->
+ * Company-Specific RAG -> Groq Response Generation -> LLM-as-a-Judge ->
+ * Approved AI Answer OR Human Escalation Ticket -> Supabase Persistence -> LangSmith Tracing
  */
 export async function runSupportAgent({
   companyId,
   conversationId,
   customerId,
   customerMessage,
+  conversationHistory = [],
   supabaseClient,
 }) {
   if (!customerMessage) {
     throw new Error('customerMessage is required');
   }
 
-  // Set up LangGraph state inputs
+  // 1. Initial State definition
   const initialState = {
-    customerQuery: customerMessage,
+    customerMessage,
     companyId: companyId || '',
     conversationId: conversationId || '',
     customerId: customerId || '',
-    messages: [
-      {
-        role: 'user',
-        content: customerMessage,
-      },
-    ],
+    conversationHistory: conversationHistory || [],
+    regenerationCount: 0,
   };
 
-  // LangSmith Run Configuration:
-  // Injects tags, tenant metadata, and execution run name for comprehensive observability
+  // 2. LangSmith Observability Run Configuration
   const runConfig = {
-    runName: `Customer Support Agent [${conversationId ? conversationId.substring(0, 8) : 'session'}]`,
+    runName: `Support Agent [${conversationId ? conversationId.substring(0, 8) : 'session'}]`,
     tags: [
       'serviq-x',
       'customer-support',
       'langgraph-agent',
       'groq-llm',
+      'llm-as-a-judge',
       companyId ? `company:${companyId}` : 'no-tenant',
     ],
     metadata: {
@@ -51,41 +52,31 @@ export async function runSupportAgent({
     },
   };
 
-  console.log(`[SERVIQ-X Agent] Running LangGraph agent for company: ${companyId || 'N/A'}`);
+  console.log(`[SERVIQ-X Engine] Executing AI Agent for company ${companyId || 'N/A'}`);
 
-  // Compile graph with scoped client (eliminates circular JSON warnings)
+  // 3. Compile Graph with Scoped Supabase Context
   const graph = buildSupportGraph(supabaseClient);
 
-  // Execute the LangGraph workflow (automatically creates root run in LangSmith)
+  // 4. Execute Workflow
   const finalState = await graph.invoke(initialState, runConfig);
 
-  // If conversationId is provided, record the message in Supabase
-  if (conversationId && supabaseClient) {
-    try {
-      await supabaseClient.from('messages').insert({
-        conversation_id: conversationId,
-        company_id: companyId,
-        sender_type: 'ai',
-        content: finalState.response,
-        metadata: {
-          intent: finalState.intent,
-          sources_count: finalState.retrievedChunks?.length || 0,
-          escalated: finalState.needsEscalation,
-          ticket_id: finalState.ticket?.id || null,
-          langsmith_traced: isTracingEnabled,
-        },
-      });
-    } catch (saveErr) {
-      console.warn('[SERVIQ-X Agent] Non-critical warning saving message to database:', saveErr.message);
-    }
-  }
+  console.log(`[SERVIQ-X Engine] Completed with Judge Verdict: ${finalState.judgeResult?.decision || 'N/A'}`);
 
   return {
-    response: finalState.response,
+    success: (finalState.executionErrors || []).length === 0,
+    response: finalState.finalResponse,
     intent: finalState.intent,
-    sources: finalState.retrievedChunks || [],
-    escalated: finalState.needsEscalation,
-    ticket: finalState.ticket,
+    decision: finalState.judgeResult?.decision,
+    judge: finalState.judgeResult,
+    judgeResult: finalState.judgeResult,
+    sources: finalState.retrievedSources || [],
+    retrievedSources: finalState.retrievedSources || [],
+    escalated: finalState.requiresHumanApproval,
+    requiresHumanApproval: finalState.requiresHumanApproval,
+    ticketId: finalState.ticketId,
+    suggestedReply: finalState.suggestedReply,
+    summary: finalState.conversationSummary,
+    conversationSummary: finalState.conversationSummary,
     errors: finalState.executionErrors || [],
   };
 }

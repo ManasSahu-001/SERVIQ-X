@@ -3,8 +3,12 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 const supabaseUrl = process.env.SUPABASE_URL || 'https://pphphvjhwfudeunipcqm.supabase.co';
-const supabasePublishableKey = process.env.SUPABASE_PUBLISHABLE_KEY || 'sb_publishable_ANC-YmcjrtcsfwBaaRTJ-w_feaQslah';
-const supabaseServiceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+const supabasePublishableKey = process.env.SUPABASE_ANON_KEY || process.env.SUPABASE_PUBLISHABLE_KEY || 'sb_publishable_ANC-YmcjrtcsfwBaaRTJ-w_feaQslah';
+const supabaseServiceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY && 
+  !process.env.SUPABASE_SERVICE_ROLE_KEY.includes('YOUR_ACTUAL') && 
+  !process.env.SUPABASE_SERVICE_ROLE_KEY.includes('your_supabase')
+  ? process.env.SUPABASE_SERVICE_ROLE_KEY
+  : '';
 
 // Public / Authenticated client creator (for request-scoped user JWT)
 export const createScopedClient = (accessToken) => {
