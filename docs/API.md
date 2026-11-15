@@ -16,7 +16,7 @@ To target a specific workspace when a user belongs to multiple organizations:
 x-company-id: <COMPANY_UUID>
 ```
 
-#### Demo / Hackathon Test Token
+### Demo / Hackathon Test Token
 When `DEMO_AUTH_ENABLED=true`, pass:
 ```http
 Authorization: Bearer demo-agent-token
