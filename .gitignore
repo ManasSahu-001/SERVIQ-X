@@ -1,0 +1,90 @@
+
+# =====================================
+# ENVIRONMENT VARIABLES & SECRETS
+# =====================================
+.env
+.env.*
+!.env.example
+!.env.*.example
+
+# API keys and credentials
+*.pem
+*.key
+secrets/
+credentials/
+service-account*.json
+
+# =====================================
+# DEPENDENCIES
+# =====================================
+node_modules/
+.pnp/
+.pnp.js
+
+# =====================================
+# BUILD OUTPUT
+# =====================================
+dist/
+build/
+out/
+.next/
+.nuxt/
+coverage/
+.vite/
+
+# =====================================
+# LOGS
+# =====================================
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+
+# =====================================
+# OPERATING SYSTEM
+# =====================================
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# =====================================
+# EDITORS & IDEs
+# =====================================
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+.idea/
+*.swp
+*.swo
+
+# =====================================
+# TESTING & CACHE
+# =====================================
+.cache/
+.temp/
+tmp/
+temp/
+.nyc_output/
+
+# =====================================
+# PYTHON (IF USED)
+# =====================================
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# =====================================
+# LOCAL DATABASE / GENERATED FILES
+# =====================================
+*.sqlite
+*.sqlite3
+*.db
+
+# =====================================
+# UPLOADS & GENERATED DOCUMENTS
+# =====================================
+uploads/
+generated/
